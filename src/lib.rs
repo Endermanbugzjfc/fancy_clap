@@ -1,6 +1,4 @@
-mod lex;
-
-//! # WIP
+mod parse;
 
 /// Credit: SOF3
 #[macro_export]
