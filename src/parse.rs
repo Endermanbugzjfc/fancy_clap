@@ -3,6 +3,8 @@
 //! For the differences between Argv indices and Clap indicies,
 //! please refer to
 //! https://docs.rs/clap/latest/clap/struct.ArgMatches.html#examples-15
+//!
+//! Subcommands not supported yet! TODO
 
 use std::{cell::{OnceCell, RefCell}, convert::AsRef, ffi::{OsStr, OsString}, rc::Rc};
 
@@ -13,17 +15,17 @@ use clap::{builder::ValueParser, CommandFactory};
 /// See `Self::from_command_factory()` and `Self::get_location()`.
 pub struct ArgLocator<T: Default, V: AsRef<clap::Arg>> {
     /// A mapping function that returns a `clap::Arg` by its short or
-    /// long aliases.
+    /// long aliases or a `None` to skip that argument.
     ///
     /// `T` is passed in the second argument as a temporary storage
     /// or cache. Wrapping the `clap::Arg` with a reference counted
     /// smart pointer (`Rc`) is recommended due to multiple aliases
     /// may lead to the same argument. See `arg_aliases`.
-    pub get_arg_by_alias: Box<dyn Fn(&Self, &T, &ArgAlias) -> V>,
+    pub get_arg_by_alias: Box<dyn Fn(&Self, &T, &ArgAlias) -> Option<V>>,
     arg_aliases: T,
 }
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Hash, Clone, Debug)]
 // Differentiates if an alias is long or short since long aliases
 // can also be one character, i.e. the length of a short.
 pub enum ArgAlias {
@@ -38,7 +40,7 @@ pub enum ArgAlias {
     Short(char),
 }
 
-#[derive(Default, Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Default, Clone, Debug)]
 /// # Example (`ArgLocation::Complete`)
 /// ```md
 ///                  --abcdefg=...............
@@ -58,13 +60,13 @@ pub struct ArgPart {
     pub length: usize,
 }
 
-#[derive(Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Debug)]
 /// Represents how an argument appears as a part in the Argv string.
 /// Every argument has the `declaration` and `name` fields.
 /// The former points to the leading hyphens, i.e. `--` or `-`,
 /// distinguished by `ArgPart.length`; The latter points to the name
-/// which for longs, should be right next to the hypens but for shorts,
-/// it depends.
+/// which for longs, should be right next to the hyphens but for shorts,
+/// they may be separated by other flags from the hyphen.
 ///
 /// # Example
 /// ```md
@@ -99,7 +101,9 @@ pub enum ArgLocation {
 const DELIMITER_LENGTH: usize = 1;
 const SHORT_LENGTH: usize = 1;
 const LONG_DECLARATION_LENGTH: usize = 2;
-const SHORT_DECLARATION_LENGTH: usize = 1;
+const SHORT_DECLARATION_LENGTH: usize = 1; // There are stuff going on in
+                                           // https://github.com/clap-rs/clap/issues/5377 but since
+                                           // it is left opened, let's not touch the codes first.
 
 impl ArgLocation {
     fn new_complete(declaration: ArgPart, name: ArgPart, content_length: usize) -> Self {
@@ -116,7 +120,9 @@ impl ArgLocation {
     }
 }
 
-impl ArgLocator<OnceCell<Vec<(ArgAlias, Rc<clap::Arg>)>>, Rc<clap::Arg>> {
+type BinarySearchableArgAliasesInCommands = OnceCell<Vec<(ArgAlias, Rc<clap::Arg>)>>;
+
+impl ArgLocator<BinarySearchableArgAliasesInCommands, Rc<clap::Arg>> {
     /// Returns `Self` with a lazily initialised aliases mapping to
     /// arguments mapping which is created from `CommandFactory`. (Or
     /// any types that derive `clap::Parser`.)
@@ -147,7 +153,7 @@ impl ArgLocator<OnceCell<Vec<(ArgAlias, Rc<clap::Arg>)>>, Rc<clap::Arg>> {
                     .binary_search_by(|(k, _)| k.cmp(alias))
                     .expect("All aliases of arg should be already known");
 
-                Rc::clone(&cache[index].1)
+                Some(Rc::clone(&cache[index].1))
             }),
         }
     }
@@ -156,10 +162,48 @@ impl ArgLocator<OnceCell<Vec<(ArgAlias, Rc<clap::Arg>)>>, Rc<clap::Arg>> {
 impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
     /// Returns the location of parts of argument in the given `args`.
     /// Returns `None` if the argument never appears in `args`.
-    pub fn get_location<R, A>(&self, args: R, arg: &str) -> Option<ArgLocation>
+    ///
+    /// # Examples
+    /// ```
+    /// #[derive(clap::Parser)]
+    /// struct Args {
+    ///     #[clap(short, long)]
+    ///     discrete: bool,
+    ///     #[clap(short)]
+    ///     stuck:    String,
+    ///     #[clap(short, long)]
+    ///     complete: usize,
+    ///     #[clap(short, long)]
+    ///     optional: Option<String>,
+    /// }
+    /// let env_args = vec![// Joined into string by space.
+    ///     "program_name", // 12 chars.
+    ///     "-dsValue",     // 8  chars.
+    ///     "--complete=1", // 12 chars.
+    /// ];
+    ///
+    /// let locator = ArgLocator::new_from_command_factory::<Args>();
+    /// assert_eq!(locator.get_location(env_args.clone(), "discrete", Some(ArgLocation::Discrete {
+    ///     declaration: ArgPart { offset: 13, length: 1 },
+    ///     name:        ArgPart { offset: 14, length: 1 },
+    /// })));
+    /// assert_eq!(locator.get_location(env_args.clone(), "stuck",    Some(ArgLocation::Stuck    {
+    ///     declaration: ArgPart { offset: 13, length: 1 },
+    ///     name:        ArgPart { offset: 15, length: 1 },
+    ///     content:     ArgPart { offset: 16, length: 5 },
+    /// })));
+    /// assert_eq!(locator.get_location(env_args.clone(), "complete", Some(ArgLocation::Complete {
+    ///     declaration: ArgPart { offset: 22, length: 2 },
+    ///     name:        ArgPart { offset: 24, length: 8 },
+    ///     delimiter:   ArgPart { offset: 32, length: 1 },
+    ///     content:     ArgPart { offset: 33, length: 1 },
+    /// })));
+    /// assert_eq!(locator.get_location(env_args.clone(), "optional", None));
+    /// ```
+    pub fn get_location<R, A>(&self, args: R, arg: &A) -> Option<ArgLocation>
     where
         R: IntoIterator<Item: Into<OsString>>,
-        A: PartialEq<clap::Id>,
+        A: PartialEq<clap::Id> + ?Sized,
     {
         let raw = clap_lex::RawArgs::new(args);
         let cursor = RefCell::new(raw.cursor());
@@ -177,9 +221,13 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
 
         'cursor: while let Some(parsed_arg) = raw.next(&mut cursor.borrow_mut()) {
             if let Some((Ok(long), accompany)) = parsed_arg.to_long() {
-                let found_generic = (self.get_arg_by_alias)(self, &self.arg_aliases, &ArgAlias::Long(long.to_string()).into());
+                let Some(found_generic) = (self.get_arg_by_alias)(
+                    self,
+                    &self.arg_aliases,
+                    &ArgAlias::Long(long.to_string()).into(),
+                ) else { continue 'cursor; };
                 let found = found_generic.as_ref();
-                if found.get_id() != arg {
+                if arg != found.get_id() {
                     name.offset += LONG_DECLARATION_LENGTH + long.len() + DELIMITER_LENGTH;
                     continue 'cursor;
                 } else {
@@ -210,10 +258,14 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                 name.offset += SHORT_DECLARATION_LENGTH;
                 'shorts: while let Some(short_os) = shorts.next_flag() {
                     if let Ok(short) = short_os {
-                        let found_generic = (self.get_arg_by_alias)(self, &self.arg_aliases, &ArgAlias::Short(short));
+                        let Some(found_generic) = (self.get_arg_by_alias)(
+                            self,
+                            &self.arg_aliases,
+                            &ArgAlias::Short(short),
+                        ) else { continue 'shorts; };
                         let found = found_generic.as_ref();
                         if found.get_possible_values() == flag_possible_values {
-                            if found.get_id() != arg {
+                            if arg != found.get_id() {
                                 name.offset += SHORT_LENGTH;
                                 continue 'shorts;
                             }
@@ -224,7 +276,7 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                             });
                         } else {
                             let remain = shorts.next_value_os();
-                            if found.get_id() != arg {
+                            if arg != found.get_id() {
                                 name.offset += SHORT_LENGTH
                                     + remain.unwrap_or(OsStr::new("")).len()
                                     + DELIMITER_LENGTH;
@@ -270,6 +322,83 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
 
 #[cfg(test)]
 mod tests {
-    // TODO: test and benchmark.
+    use super::*;
+
+    #[test]
+    fn test_get_location_short_equals() {
+        #[derive(clap::Parser)]
+        struct Args {
+            #[clap(short)]
+            should_stick: String,
+        }
+
+        let locator = ArgLocator::from_command_factory::<Args>();
+        let env_args = ["program_name", "-s=Value"];
+        let location = locator.get_location(env_args, "should_stick");
+        assert_eq!(location, Some(ArgLocation::Complete {
+            declaration: ArgPart { offset: 13, length: 1 },
+            name: ArgPart { offset: 14, length: 1 },
+            delimiter: ArgPart { offset: 15, length: 1 },
+            content: ArgPart { offset: 16, length: 5 },
+        }));
+    }
+
+    #[test]
+    fn test_get_location_hyphen_values() {
+        #[derive(clap::Parser)]
+        struct Args {
+            #[clap(long, allow_hyphen_values=true)]
+            complete: String,
+            #[clap(short, allow_hyphen_values=true)]
+            stuck: f32,
+        }
+
+        let locator = ArgLocator::from_command_factory::<Args>();
+        let env_args = ["program_name", "--complete", "-.1", "-s-2."];
+        assert_eq!(locator.get_location(env_args.clone(), "complete"), Some(ArgLocation::Complete {
+            declaration: ArgPart { offset: 13, length: 2 },
+            name: ArgPart { offset: 15, length: 8 },
+            delimiter: ArgPart { offset: 23, length: 1 },
+            content: ArgPart { offset: 24, length: 3 },
+        }));
+        assert_eq!(locator.get_location(env_args.clone(), "stuck"), Some(ArgLocation::Stuck {
+            declaration: ArgPart { offset: 28, length: 1 },
+            name: ArgPart { offset: 29, length: 1 },
+            content: ArgPart { offset: 30, length: 3 },
+        }));
+    }
+
+    fn test_get_location_stuck_new_bool_and_hyphen_string() {
+        #[derive(Clone)]
+        struct NewFlag(bool);
+        #[derive(clap::Parser)]
+        struct Args {
+            #[clap(short, value_parser=clap::builder::BoolishValueParser::new())]
+            new_flag: NewFlag,
+            #[clap(short)]
+            should_stick: String,
+            primitive_flag: bool,
+        }
+
+        let locator = ArgLocator::from_command_factory::<Args>();
+        let args_env = vec!["program_name", "-npspn"];
+        assert_eq!(locator.get_location(args_env.clone(), "new_flag"), Some(ArgLocation::Discrete {
+            declaration: ArgPart { offset: 13, length: 1 },
+            name: ArgPart { offset: 14, length: 1 },
+        }));
+        assert_eq!(locator.get_location(args_env.clone(), "primitive_flag"), Some(ArgLocation::Discrete {
+            declaration: ArgPart { offset: 13, length: 1 },
+            name: ArgPart { offset: 15, length: 1 },
+        }));
+        assert_eq!(locator.get_location(args_env.clone(), "should_stuck"), Some(ArgLocation::Stuck {
+            declaration: ArgPart { offset: 13, length: 1 },
+            name: ArgPart { offset: 16, length: 1 },
+            content: ArgPart { offset: 17, length: 2 },
+        }));
+    }
+    //
+    // #[bench]
+    // fn bench_get_location_repeated() {
+    // }
 }
 
