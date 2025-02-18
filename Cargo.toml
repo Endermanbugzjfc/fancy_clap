@@ -10,6 +10,7 @@ license = "MIT"
 clap = "4.5.27"
 clap_lex = "0.7.4"
 miette = "7.4.0"
+nonempty = "0.11.0"
 
 [dev-dependencies]
 clap = { version = "4.5.27", features = ["derive"] }

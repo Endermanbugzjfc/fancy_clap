@@ -4,16 +4,18 @@
 //! please refer to
 //! https://docs.rs/clap/latest/clap/struct.ArgMatches.html#examples-15
 //!
-//! Subcommands not supported yet! TODO
+//! Subcommands not supported yet!
 
 use std::{cell::{OnceCell, RefCell}, convert::AsRef, ffi::{OsStr, OsString}, rc::Rc};
 
-use clap::{builder::ValueParser, CommandFactory};
+use clap::{value_parser, CommandFactory};
+use nonempty::NonEmpty;
 
 /// Parses the Argv string and finds a how a specific argument
 /// appears in the Argv string.
 /// See `Self::from_command_factory()` and `Self::get_location()`.
 pub struct ArgLocator<T: Default, V: AsRef<clap::Arg>> {
+    #[allow(clippy::type_complexity)] // Generic type parameter cannot be made into type alias.
     /// A mapping function that returns a `clap::Arg` by its short or
     /// long aliases or a `None` to skip that argument.
     ///
@@ -120,7 +122,7 @@ impl ArgLocation {
     }
 }
 
-type BinarySearchableArgAliasesInCommands = OnceCell<Vec<(ArgAlias, Rc<clap::Arg>)>>;
+type BinarySearchableArgAliasesInCommands = OnceCell<NonEmpty<(ArgAlias, Rc<clap::Arg>)>>;
 
 impl ArgLocator<BinarySearchableArgAliasesInCommands, Rc<clap::Arg>> {
     /// Returns `Self` with a lazily initialised aliases mapping to
@@ -134,24 +136,30 @@ impl ArgLocator<BinarySearchableArgAliasesInCommands, Rc<clap::Arg>> {
                     let mut aliases = vec![];
                     for arg in C::command().get_arguments() {
                         let rc = Rc::new(arg.to_owned());
-                        if let Some(all_aliases) = arg.get_all_aliases() {
-                            for alias in all_aliases.into_iter().chain(arg.get_long()) {
-                                aliases.push((ArgAlias::Long(alias.to_string()), Rc::clone(&rc)));
-                            }
+                        for long in arg
+                            .get_long()
+                            .into_iter()
+                            .chain(arg
+                            .get_all_aliases()
+                            .unwrap_or_default()) {
+                            aliases.push((ArgAlias::Long(long.to_string()), Rc::clone(&rc)));
                         }
-                        if let Some(short_aliases) = arg.get_all_short_aliases() {
-                            for alias in short_aliases.into_iter().chain(arg.get_short()) {
-                                aliases.push((ArgAlias::Short(alias), Rc::clone(&rc)));
-                            }
+                        for short in arg
+                            .get_short()
+                            .into_iter()
+                            .chain(arg
+                            .get_all_short_aliases()
+                            .unwrap_or_default()) {
+                            aliases.push((ArgAlias::Short(short), Rc::clone(&rc)));
                         }
                     }
-                    aliases.sort_unstable_by(|(a, _), (b, _)| a.cmp(&b)); // For binary search.
+                    aliases.sort_unstable_by(|(a, _), (b, _)| a.cmp(b)); // For binary search.
 
-                    aliases
+                    NonEmpty::from_vec(aliases).expect("Arg has no aliases or real names")
                 });
                 let index = cache
                     .binary_search_by(|(k, _)| k.cmp(alias))
-                    .expect("All aliases of arg should be already known");
+                    .ok()?;
 
                 Some(Rc::clone(&cache[index].1))
             }),
@@ -208,29 +216,31 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
         let raw = clap_lex::RawArgs::new(args);
         let cursor = RefCell::new(raw.cursor());
         let mut name = ArgPart::default();
-        let peek_or_discrete = |declaration: ArgPart, name: ArgPart| {
+        let peek_or_discrete = |arg: &clap::Arg, declaration: ArgPart, name: ArgPart| {
             if let Some(peek) = raw.peek(&cursor.borrow()) {
                 // Marks all following arguments that do not start with `-` or `--` as part
                 // of the content.
-                if peek.to_long().is_none() && peek.to_short().is_none() {
+                if arg.is_allow_hyphen_values_set() || peek.to_long().is_none() && peek.to_short().is_none() {
                     return ArgLocation::new_complete(declaration, name, peek.to_value_os().len());
                 }
             }
             ArgLocation::Discrete { declaration, name }
         };
 
-        'cursor: while let Some(parsed_arg) = raw.next(&mut cursor.borrow_mut()) {
+        // TODO: test without refcell
+        'cursor: while let Some(parsed_arg) = { let next = raw.next(&mut cursor.borrow_mut()); next } {
             if let Some((Ok(long), accompany)) = parsed_arg.to_long() {
                 let Some(found_generic) = (self.get_arg_by_alias)(
                     self,
                     &self.arg_aliases,
-                    &ArgAlias::Long(long.to_string()).into(),
+                    &ArgAlias::Long(long.to_string()),
                 ) else { continue 'cursor; };
                 let found = found_generic.as_ref();
                 if arg != found.get_id() {
                     name.offset += LONG_DECLARATION_LENGTH + long.len() + DELIMITER_LENGTH;
                     continue 'cursor;
                 } else {
+                    name.offset += LONG_DECLARATION_LENGTH;
                     name.length = long.len();
                 }
                 let declaration = ArgPart {
@@ -243,13 +253,8 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                     return Some(ArgLocation::new_complete(declaration, name, value.len()));
                 }
 
-                return Some(peek_or_discrete(declaration, name));
+                return Some(peek_or_discrete(found, declaration, name));
             } else if let Some(mut shorts) = parsed_arg.to_short() {
-                let flag_possible_values = ValueParser::bool()
-                    .possible_values()
-                    .and_then(|values| Some(values.collect::<Vec<_>>()))
-                    .unwrap_or(vec![]);
-
                 let declaration = ArgPart {
                     offset: name.offset,
                     length: SHORT_DECLARATION_LENGTH,
@@ -264,7 +269,7 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                             &ArgAlias::Short(short),
                         ) else { continue 'shorts; };
                         let found = found_generic.as_ref();
-                        if found.get_possible_values() == flag_possible_values {
+                        if Self::is_arg_discrete(found) {
                             if arg != found.get_id() {
                                 name.offset += SHORT_LENGTH;
                                 continue 'shorts;
@@ -301,22 +306,26 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                                 }});
                             }
 
-                            return Some(peek_or_discrete(declaration, ArgPart {
+                            return Some(peek_or_discrete(found, declaration, ArgPart {
                                 length: SHORT_LENGTH,
                                 ..*name
                             }));
                         }
-                    }
-                }
+                    } // Else short is non-UTF-8 and skipped.
+                } // All shorts have been iterated.
+                continue 'cursor;
             } else {
                 name.offset += parsed_arg.to_value_os().len() + DELIMITER_LENGTH;
                 continue 'cursor;
-            }
-
-            panic!("All branches should return or continue");
-        }
+            } // Current arg does not match target `arg`.
+        } // All args have been iterated.
 
         None
+    }
+
+    /// https://docs.rs/clap_builder/4.5.29/src/clap_builder/builder/arg.rs.html#4249
+    fn is_arg_discrete(arg: &clap::Arg) -> bool {
+        !arg.get_num_args().unwrap_or_else(|| 1.into()).takes_values()
     }
 }
 
@@ -355,21 +364,23 @@ mod tests {
 
         let locator = ArgLocator::from_command_factory::<Args>();
         let env_args = ["program_name", "--complete", "-.1", "-s-2."];
-        assert_eq!(locator.get_location(env_args.clone(), "complete"), Some(ArgLocation::Complete {
+        assert_eq!(locator.get_location(env_args, "complete"), Some(ArgLocation::Complete {
             declaration: ArgPart { offset: 13, length: 2 },
             name: ArgPart { offset: 15, length: 8 },
             delimiter: ArgPart { offset: 23, length: 1 },
             content: ArgPart { offset: 24, length: 3 },
         }));
-        assert_eq!(locator.get_location(env_args.clone(), "stuck"), Some(ArgLocation::Stuck {
+        assert_eq!(locator.get_location(env_args, "stuck"), Some(ArgLocation::Stuck {
             declaration: ArgPart { offset: 28, length: 1 },
             name: ArgPart { offset: 29, length: 1 },
             content: ArgPart { offset: 30, length: 3 },
         }));
     }
 
-    fn test_get_location_stuck_new_bool_and_hyphen_string() {
+    #[test]
+    fn test_get_location_stuck_derived_bool() {
         #[derive(Clone)]
+        #[allow(dead_code)]
         struct NewFlag(bool);
         #[derive(clap::Parser)]
         struct Args {
@@ -396,6 +407,9 @@ mod tests {
             content: ArgPart { offset: 17, length: 2 },
         }));
     }
+
+    // #[TODO]
+    fn test_get_location_aliases() {}
     //
     // #[bench]
     // fn bench_get_location_repeated() {
