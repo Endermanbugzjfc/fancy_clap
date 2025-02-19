@@ -6,9 +6,13 @@
 //!
 //! Subcommands not supported yet!
 
-use std::{cell::{OnceCell, RefCell}, convert::AsRef, ffi::{OsStr, OsString}, rc::Rc};
+use std::{cell::{Cell, OnceCell, RefCell}, convert::AsRef, ffi::{OsStr, OsString}, rc::Rc};
 
+<<<<<<< Updated upstream
 use clap::{value_parser, CommandFactory};
+=======
+use clap::CommandFactory;
+>>>>>>> Stashed changes
 use nonempty::NonEmpty;
 
 /// Parses the Argv string and finds a how a specific argument
@@ -208,10 +212,10 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
     /// })));
     /// assert_eq!(locator.get_location(env_args.clone(), "optional", None));
     /// ```
-    pub fn get_location<R, A>(&self, args: R, arg: &A) -> Option<ArgLocation>
+    pub fn get_locations<R, A>(&self, args: R, targets: &[A]) -> Vec<Option<ArgLocation>>
     where
         R: IntoIterator<Item: Into<OsString>>,
-        A: PartialEq<clap::Id> + ?Sized,
+        A: PartialEq<clap::Id>,
     {
         let raw = clap_lex::RawArgs::new(args);
         let cursor = RefCell::new(raw.cursor());
@@ -226,9 +230,24 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
             }
             ArgLocation::Discrete { declaration, name }
         };
+        let results = RefCell::new(Vec::with_capacity(targets.len()));
+        let resolved = Cell::new(0);
+        let resolve = |index: usize, result: ArgLocation| {
+            *results[index] = result;
+            *resolved += 1;
+        }
 
+<<<<<<< Updated upstream
         // TODO: test without refcell
         'cursor: while let Some(parsed_arg) = { let next = raw.next(&mut cursor.borrow_mut()); next } {
+=======
+        'cursor: while let Some(parsed_arg) = if resolved.get() >= targets.len() {
+            None
+        } else {
+            let next = raw.next(&mut cursor.borrow_mut());
+            next
+        } {
+>>>>>>> Stashed changes
             if let Some((Ok(long), accompany)) = parsed_arg.to_long() {
                 let Some(found_generic) = (self.get_arg_by_alias)(
                     self,
@@ -236,13 +255,23 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                     &ArgAlias::Long(long.to_string()),
                 ) else { continue 'cursor; };
                 let found = found_generic.as_ref();
-                if arg != found.get_id() {
+                let target_pos = if let Some(pos) = targets
+                    .iter()
+                    .position(|target| target == found.get_id()) {
+                    name.offset += LONG_DECLARATION_LENGTH;
+                    name.length = long.len();
+                    pos
+                } else {
                     name.offset += LONG_DECLARATION_LENGTH + long.len() + DELIMITER_LENGTH;
                     continue 'cursor;
+<<<<<<< Updated upstream
                 } else {
                     name.offset += LONG_DECLARATION_LENGTH;
                     name.length = long.len();
                 }
+=======
+                };
+>>>>>>> Stashed changes
                 let declaration = ArgPart {
                     offset: name.offset - LONG_DECLARATION_LENGTH,
                     length: LONG_DECLARATION_LENGTH,
@@ -250,10 +279,15 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                 let name = name; // Safety: make immutable.
 
                 if let Some(value) = accompany {
-                    return Some(ArgLocation::new_complete(declaration, name, value.len()));
+                    resolve(target_pos, ArgLocation::new_complete(declaration, name, value.len()));
+                } else {
+                    resolve(target_pos, peek_or_discrete(found, declaration, name));
                 }
+<<<<<<< Updated upstream
 
                 return Some(peek_or_discrete(found, declaration, name));
+=======
+>>>>>>> Stashed changes
             } else if let Some(mut shorts) = parsed_arg.to_short() {
                 let declaration = ArgPart {
                     offset: name.offset,
@@ -269,58 +303,91 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                             &ArgAlias::Short(short),
                         ) else { continue 'shorts; };
                         let found = found_generic.as_ref();
+<<<<<<< Updated upstream
                         if Self::is_arg_discrete(found) {
                             if arg != found.get_id() {
+=======
+                        let target_pos = targets
+                            .iter()
+                            .position(|target| target == found.get_id());
+                        if Self::is_arg_discrete(found) {
+                            let target_pos = if let Some(pos) = target_pos { pos } else {
+>>>>>>> Stashed changes
                                 name.offset += SHORT_LENGTH;
                                 continue 'shorts;
-                            }
+                            };
 
-                            return Some(ArgLocation::Discrete {
+                            resolve(target_pos, ArgLocation::Discrete {
                                 declaration,
                                 name: ArgPart { length: 1, ..*name },
                             });
                         } else {
                             let remain = shorts.next_value_os();
-                            if arg != found.get_id() {
+                            let target_pos = if let Some(pos) = target_pos { pos } else {
                                 name.offset += SHORT_LENGTH
                                     + remain.unwrap_or(OsStr::new("")).len()
                                     + DELIMITER_LENGTH;
-                                continue 'cursor;
-                            }
+                                continue 'cursor; // Remaining shorts are values.
+                            };
 
                             if let Some(stuck) = remain {
                                 let accompany_bytes = stuck.as_encoded_bytes();
                                 if let &[b'=', ..] = accompany_bytes {
-                                    return Some(ArgLocation::new_complete(declaration, ArgPart {
+                                    resolve(target_pos, ArgLocation::new_complete(declaration, ArgPart {
                                         length: SHORT_LENGTH,
                                         ..*name
                                     }, stuck.len() - 1));
+                                } else {
+                                    resolve(target_pos, ArgLocation::Stuck { declaration, name: ArgPart {
+                                        length: SHORT_LENGTH,
+                                        ..*name
+                                    }, content: ArgPart {
+                                        offset: name.offset + 1,
+                                        length: stuck.len(),
+                                    }});
                                 }
-
-                                return Some(ArgLocation::Stuck { declaration, name: ArgPart {
-                                    length: SHORT_LENGTH,
-                                    ..*name
-                                }, content: ArgPart {
-                                    offset: name.offset + 1,
-                                    length: stuck.len(),
-                                }});
+                                continue 'shorts;
                             }
 
+<<<<<<< Updated upstream
                             return Some(peek_or_discrete(found, declaration, ArgPart {
+=======
+                            resolve(target_pos, peek_or_discrete(found, declaration, ArgPart {
+>>>>>>> Stashed changes
                                 length: SHORT_LENGTH,
                                 ..*name
                             }));
                         }
                     } // Else short is non-UTF-8 and skipped.
                 } // All shorts have been iterated.
+<<<<<<< Updated upstream
                 continue 'cursor;
             } else {
                 name.offset += parsed_arg.to_value_os().len() + DELIMITER_LENGTH;
                 continue 'cursor;
             } // Current arg does not match target `arg`.
         } // All args have been iterated.
+=======
+            } else {
+                name.offset += parsed_arg.to_value_os().len() + DELIMITER_LENGTH;
+            } // Current arg has been proccessed.
+        } // All args have been iterated.
 
-        None
+        results.take()
+    }
+>>>>>>> Stashed changes
+
+    pub fn get_location<R, A>(&self, args: R, arg: A) -> Option<ArgLocation>
+    where
+        R: IntoIterator<Item: Into<OsString>>,
+        A: PartialEq<clap::Id>,
+    {
+        std::mem::take(&mut self.get_locations(args, &[arg])[0])
+    }
+
+    /// https://docs.rs/clap_builder/4.5.29/src/clap_builder/builder/arg.rs.html#4249
+    fn is_arg_discrete(arg: &clap::Arg) -> bool {
+        !arg.get_num_args().unwrap_or_else(|| 1.into()).takes_values()
     }
 
     /// https://docs.rs/clap_builder/4.5.29/src/clap_builder/builder/arg.rs.html#4249
