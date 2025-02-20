@@ -6,7 +6,7 @@
 //!
 //! Subcommands not supported yet!
 
-use std::{cell::{OnceCell, RefCell}, convert::AsRef, ffi::{OsStr, OsString}, rc::Rc};
+use std::{cell::{Cell, OnceCell, RefCell}, convert::AsRef, ffi::{OsStr, OsString}, rc::Rc};
 
 use clap::CommandFactory;
 use nonempty::NonEmpty;
@@ -20,7 +20,11 @@ pub struct ArgLocator<T: Default, V: AsRef<clap::Arg>> {
     /// long aliases or a `None` to skip that argument.
     ///
     /// `T` is passed in the second argument as a temporary storage
-    /// or cache. Wrapping the `clap::Arg` with a reference counted
+    /// or cache. `Cell`-like data types may be used for interior
+    /// mutability. To ahieve lazy initilisation, use `OnceCell` or
+    /// `LazyCell`.
+    /// lazy initialisation.
+    /// Wrapping the `clap::Arg` with a reference counted
     /// smart pointer (`Rc`) is recommended due to multiple aliases
     /// may lead to the same argument. See `arg_aliases`.
     pub get_arg_by_alias: Box<dyn Fn(&Self, &T, &ArgAlias) -> Option<V>>,
@@ -183,7 +187,7 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
         let raw = clap_lex::RawArgs::new(args);
         let cursor = RefCell::new(raw.cursor());
         let mut name = ArgPart::default();
-        let peek_or_discrete = |arg: &clap::Arg, declaration, name| {
+        let consume_adjacent = |arg: &clap::Arg, declaration, name| {
             if let Some(peek) = raw.peek(&cursor.borrow()) {
                 // Marks all following arguments that do not start with `-` or `--` as part
                 // of the content.
@@ -235,7 +239,7 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                     )) { break 'cursor; };
                 } else {
                     #[allow(clippy::collapsible_else_if)]
-                    if resolve(found_pos, peek_or_discrete(
+                    if resolve(found_pos, consume_adjacent(
                         found,
                         declaration,
                         name.clone(),
@@ -296,7 +300,7 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
                                 continue 'shorts;
                             }
 
-                            if resolve(found_pos, peek_or_discrete(
+                            if resolve(found_pos, consume_adjacent(
                                 found,
                                 declaration.clone(),
                                 ArgPart { length: SHORT_LENGTH, ..name },
@@ -376,6 +380,7 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
     }
 
     /// https://docs.rs/clap_builder/4.5.29/src/clap_builder/builder/arg.rs.html#4249
+    /// https://docs.rs/clap/latest/clap/enum.ArgAction.html#method.takes_values
     fn is_arg_discrete(arg: &clap::Arg) -> bool {
         !arg.get_action().takes_values()
     }
@@ -410,33 +415,48 @@ mod tests {
         struct Args {
             #[clap(long, allow_hyphen_values=true)]
             complete: String,
+            #[clap(long)]
+            should_absent: bool,
             #[clap(short, allow_hyphen_values=true)]
             stuck: f32,
         }
 
         let locator = ArgLocator::from_command_factory::<Args>();
-        let env_args = ["program_name", "--complete", "-.1", "-s-2."];
+        let env_args = ["program_name", "--complete", "--should-absent", "-s-2."];
         assert_eq!(locator.get_location_first(env_args, "complete"), Some(ArgLocation::Complete {
             declaration: ArgPart { offset: 13, length: 2 },
             name: ArgPart { offset: 15, length: 8 },
             delimiter: ArgPart { offset: 23, length: 1 },
-            content: ArgPart { offset: 24, length: 3 },
+            content: ArgPart { offset: 24, length: 15 },
         }));
+        assert_eq!(locator.get_location_first(env_args, "should_absent"), None);
         assert_eq!(locator.get_location_first(env_args, "stuck"), Some(ArgLocation::Stuck {
-            declaration: ArgPart { offset: 28, length: 1 },
-            name: ArgPart { offset: 29, length: 1 },
-            content: ArgPart { offset: 30, length: 3 },
+            declaration: ArgPart { offset: 40, length: 1 },
+            name: ArgPart { offset: 41, length: 1 },
+            content: ArgPart { offset: 42, length: 3 },
         }));
     }
 
     #[test]
     fn test_get_location_stuck_derived_bool() {
         #[derive(Clone)]
-        #[allow(dead_code)]
-        struct NewFlag(bool);
+        struct NewFlag ;
+        impl std::str::FromStr for NewFlag {
+            type Err = String;
+
+            fn from_str(_: &str) -> Result<Self, Self::Err> {
+                Ok(NewFlag)
+            }
+        }
+
         #[derive(clap::Parser)]
         struct Args {
-            #[clap(short, value_parser=clap::builder::BoolishValueParser::new())]
+            #[clap(
+                short,
+                // https://docs.rs/clap_builder/4.5.30/src/clap_builder/builder/action.rs.html#360
+                action=clap::ArgAction::SetFalse,
+                value_parser=clap::value_parser!(NewFlag),
+            )]
             new_flag: NewFlag,
             #[clap(short)]
             should_stick: String,
