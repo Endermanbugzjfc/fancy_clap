@@ -1,4 +1,4 @@
-//! Parsing the arguments using `clap_lex` to get the correct
+//! Parsing the arguments using [`clap_lex`] to get the correct
 //! offset and length of an argument in the Argv string.
 //! For the differences between Argv indices and Clap indicies,
 //! please refer to
@@ -6,26 +6,26 @@
 //!
 //! Subcommands not supported yet!
 
-use std::{cell::{Cell, OnceCell, RefCell}, convert::AsRef, ffi::{OsStr, OsString}, rc::Rc};
+use std::{cell::{OnceCell, RefCell}, convert::AsRef, ffi::{OsStr, OsString}, ops::Sub, rc::Rc};
 
 use clap::CommandFactory;
 use nonempty::NonEmpty;
 
 /// Parses the Argv string and finds a how a specific argument
 /// appears in the Argv string.
-/// See `Self::from_command_factory()` and `Self::get_location_first()`.
+/// See [`Self::from_command_factory()`] and [`Self::get_location_first()`].
 pub struct ArgLocator<T: Default, V: AsRef<clap::Arg>> {
     #[allow(clippy::type_complexity)] // Generic type parameter cannot be made into type alias.
-    /// A mapping function that returns a `clap::Arg` by its short or
-    /// long aliases or a `None` to skip that argument.
+    /// A mapping function that returns a [`clap::Arg`] by its short or
+    /// long aliases or a [`None`] to skip that argument.
     ///
     /// `T` is passed in the second argument as a temporary storage
-    /// or cache. `Cell`-like data types may be used for interior
-    /// mutability. To ahieve lazy initilisation, use `OnceCell` or
-    /// `LazyCell`.
+    /// or cache. Cell-like data types may be used for interior
+    /// mutability. To ahieve lazy initilisation, use [`OnceCell`] or
+    /// [`std::cell::LazyCell`].
     /// lazy initialisation.
-    /// Wrapping the `clap::Arg` with a reference counted
-    /// smart pointer (`Rc`) is recommended due to multiple aliases
+    /// Wrapping the [`clap::Arg`] with a reference counted
+    /// smart pointer ([`Rc`]) is recommended due to multiple aliases
     /// may lead to the same argument. See `arg_aliases`.
     pub get_arg_by_alias: Box<dyn Fn(&Self, &T, &ArgAlias) -> Option<V>>,
     arg_aliases: T,
@@ -37,7 +37,7 @@ pub struct ArgLocator<T: Default, V: AsRef<clap::Arg>> {
 pub enum ArgAlias {
     /// Longs are led by double hyphens in the Argv string.
     /// Example: `--long`, `--l`.
-    /// Note: hyphens are not included in this `String`.
+    /// Note: hyphens are not included in this [`String`].
     Long(String),
     /// Shorts are led by single hyphen in the Argv string.
     ///
@@ -47,7 +47,7 @@ pub enum ArgAlias {
 }
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Default, Clone, Debug)]
-/// # Example (`ArgLocation::Complete`)
+/// # Example ([`ArgLocation::Complete`])
 /// ```md
 ///                  --abcdefg=...............
 ///                  ^ ^      ^^
@@ -61,8 +61,8 @@ pub struct ArgPart {
     /// Offset of the leading character of a part in the Argv string.
     pub offset: usize,
     /// Length of a part in the Argv string. For accurate characters
-    /// count, mapping `std::env::ArgsOs` with `OsStr::to_string_lossy`
-    /// before passing it to `ArgLocator::get_location_first()` is recommended.
+    /// count, mapping [`std::env::ArgsOs`] with [`OsStr::to_string_lossy`]
+    /// before passing it to [`ArgLocator::get_location_first()`] is recommended.
     pub length: usize,
 }
 
@@ -70,7 +70,7 @@ pub struct ArgPart {
 /// Represents how an argument appears as a part in the Argv string.
 /// Every argument has the `declaration` and `name` fields.
 /// The former points to the leading hyphens, i.e. `--` or `-`,
-/// distinguished by `ArgPart.length`; The latter points to the name
+/// distinguished by [`ArgPart::length`]; The latter points to the name
 /// which for longs, should be right next to the hyphens but for shorts,
 /// they may be separated by other flags from the hyphen.
 ///
@@ -95,7 +95,7 @@ pub enum ArgLocation {
     },
     /// Argument that has a value which is separated by either a space
     /// or an equal sign (reserved for future compatibility).
-    /// See `ArgPart` for visualised example.
+    /// See [`ArgPart`] for visualised example.
     Complete {
         declaration: ArgPart,
         name: ArgPart,
@@ -130,8 +130,8 @@ type BinarySearchableArgAliasesInCommands = OnceCell<NonEmpty<(ArgAlias, Rc<clap
 
 impl ArgLocator<BinarySearchableArgAliasesInCommands, Rc<clap::Arg>> {
     /// Returns `Self` with a lazily initialised aliases mapping to
-    /// arguments mapping which is created from `CommandFactory`. (Or
-    /// any types that derive `clap::Parser`.)
+    /// arguments mapping which is created from [`CommandFactory`]. (Or
+    /// any types that derive [`clap::Parser`].)
     pub fn from_command_factory<C: CommandFactory>() -> Self {
         Self {
             arg_aliases: OnceCell::new(),
@@ -172,8 +172,8 @@ impl ArgLocator<BinarySearchableArgAliasesInCommands, Rc<clap::Arg>> {
 }
 
 impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
-    /// See `Self::get_location_first()`.
-    /// If `targets` is `None`, all identified args will be included in the return.
+    /// See [`Self::get_location_first()`].
+    /// If `targets` is [`None`], all identified args will be included in the return.
     pub fn get_locations<'a, R, A>(
         &self,
         args: R,
@@ -188,14 +188,45 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
         let cursor = RefCell::new(raw.cursor());
         let mut name = ArgPart::default();
         let consume_adjacent = |arg: &clap::Arg, declaration, name| {
-            if let Some(peek) = raw.peek(&cursor.borrow()) {
-                // Marks all following arguments that do not start with `-` or `--` as part
-                // of the content.
-                if arg.is_allow_hyphen_values_set() || peek.to_long().is_none() && peek.to_short().is_none() {
-                    return ArgLocation::new_complete(declaration, name, peek.to_value_os().len());
+            let borrow = &mut cursor.borrow_mut();
+            let accept_hyphen = arg.is_allow_hyphen_values_set();
+
+            let mut consume_count = arg
+                .get_num_args()
+                .map(|range| range.max_values() - 1)
+                .unwrap_or(1);
+            let mut content_length = 0;
+            // This should do the same effect as [`Iterator::take_while()`]
+            // considering that `raw` is not a real iterator.
+            while let Some(peek) = raw.peek(borrow) {
+                content_length += peek.to_value_os().len();
+
+                dbg!(arg.get_id());
+                dbg!(consume_count);
+                dbg!(accept_hyphen);
+                dbg!(peek.is_long());
+                dbg!(peek.is_short());
+                dbg!(peek.to_value_os());
+                if accept_hyphen || peek.is_long() || peek.is_short() {
+                    let _ = dbg!(raw.next(borrow));
+                }
+
+                //consume_count = consume_count.map(|count| count.sub(1));
+                consume_count -= 1;
+                if consume_count == 0 {
+                    // Arguments without a range with consume as many as possible
+                    // considering that the end user might have made a mistake to
+                    // include them there.
+
+                    break;
                 }
             }
-            ArgLocation::Discrete { declaration, name }
+
+            if content_length > 0 {
+                ArgLocation::new_complete(declaration, name, content_length)
+            } else {
+                ArgLocation::Discrete { declaration, name }
+            }
         }; let mut results = vec![];
         let mut resolved_counts: Vec<usize> = targets
             .iter()
@@ -208,6 +239,7 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
         };
 
         'cursor: while let Some(parsed_arg) =  { let next = raw.next(&mut cursor.borrow_mut()); next } {
+            dbg!(&parsed_arg);
             if let Some((Ok(long), accompany)) = parsed_arg.to_long() {
                 let Some(found_generic) = (self.get_arg_by_alias)(
                     self,
@@ -327,8 +359,8 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
 
     /// Returns an argument's first occurence in the given `args`.
     /// An location consists of different parts of that argument,
-    /// see `ArgLocation`.
-    /// Returns `None` if the argument never appears in `args`.
+    /// see [`ArgLocation`].
+    /// Returns [`None`] if the argument never appears in `args`.
     ///
     /// # Examples
     /// ```
