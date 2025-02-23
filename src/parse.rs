@@ -16,35 +16,10 @@ use nonempty::NonEmpty;
 /// See [`Self::from_command_factory()`] and [`Self::get_location_first()`].
 pub struct ArgLocator<T: Default, V: AsRef<clap::Arg>> {
     #[allow(clippy::type_complexity)] // Generic type parameter cannot be made into type alias.
-    /// A mapping function that returns a [`clap::Arg`] by its short or
-    /// long aliases or a [`None`] to skip that argument.
-    ///
-    /// `T` is passed in the second argument as a temporary storage
-    /// or cache. Cell-like data types may be used for interior
-    /// mutability. To ahieve lazy initilisation, use [`OnceCell`] or
-    /// [`std::cell::LazyCell`].
-    /// lazy initialisation.
-    /// Wrapping the [`clap::Arg`] with a reference counted
-    /// smart pointer ([`Rc`]) is recommended due to multiple aliases
-    /// may lead to the same argument. See `arg_aliases`.
     pub get_arg_by_alias: Box<dyn Fn(&Self, &T, &ArgAlias) -> Option<V>>,
     arg_aliases: T,
 }
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Hash, Clone, Debug)]
-// Differentiates if an alias is long or short since long aliases
-// can also be one character, i.e. the length of a short.
-pub enum ArgAlias {
-    /// Longs are led by double hyphens in the Argv string.
-    /// Example: `--long`, `--l`.
-    /// Note: hyphens are not included in this [`String`].
-    Long(String),
-    /// Shorts are led by single hyphen in the Argv string.
-    ///
-    /// Multiple shorts can stick together.
-    /// Example: `-s`, `-abcds`.
-    Short(char),
-}
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Default, Clone, Debug)]
 /// # Example ([`ArgLocation::Complete`])
@@ -126,48 +101,12 @@ impl ArgLocation {
     }
 }
 
-type BinarySearchableArgAliasesInCommands = OnceCell<NonEmpty<(ArgAlias, Rc<clap::Arg>)>>;
 
 impl ArgLocator<BinarySearchableArgAliasesInCommands, Rc<clap::Arg>> {
     /// Returns `Self` with a lazily initialised aliases mapping to
     /// arguments mapping which is created from [`CommandFactory`]. (Or
     /// any types that derive [`clap::Parser`].)
     pub fn from_command_factory<C: CommandFactory>() -> Self {
-        Self {
-            arg_aliases: OnceCell::new(),
-            get_arg_by_alias: Box::new(|_, arg_aliases, alias| {
-                let cache = arg_aliases.get_or_init(|| {
-                    let mut aliases = vec![];
-                    for arg in C::command().get_arguments() {
-                        let rc = Rc::new(arg.to_owned());
-                        for long in arg
-                            .get_long()
-                            .into_iter()
-                            .chain(arg
-                            .get_all_aliases()
-                            .unwrap_or_default()) {
-                            aliases.push((ArgAlias::Long(long.to_string()), Rc::clone(&rc)));
-                        }
-                        for short in arg
-                            .get_short()
-                            .into_iter()
-                            .chain(arg
-                            .get_all_short_aliases()
-                            .unwrap_or_default()) {
-                            aliases.push((ArgAlias::Short(short), Rc::clone(&rc)));
-                        }
-                    }
-                    aliases.sort_unstable_by(|(a, _), (b, _)| a.cmp(b)); // For binary search.
-
-                    NonEmpty::from_vec(aliases).expect("Arg has no aliases or real names")
-                });
-                let index = cache
-                    .binary_search_by(|(k, _)| k.cmp(alias))
-                    .ok()?;
-
-                Some(Rc::clone(&cache[index].1))
-            }),
-        }
     }
 }
 
@@ -198,17 +137,17 @@ impl<T: Default, V: AsRef<clap::Arg>> ArgLocator<T, V> {
             let mut content_length = 0;
             // This should do the same effect as [`Iterator::take_while()`]
             // considering that `raw` is not a real iterator.
-            while let Some(peek) = raw.peek(borrow) {
-                content_length += peek.to_value_os().len();
-
                 dbg!(arg.get_id());
                 dbg!(consume_count);
                 dbg!(accept_hyphen);
+            while let Some(peek) = raw.peek(borrow) {
+                content_length += peek.to_value_os().len();
+
                 dbg!(peek.is_long());
                 dbg!(peek.is_short());
                 dbg!(peek.to_value_os());
                 if accept_hyphen || peek.is_long() || peek.is_short() {
-                    let _ = dbg!(raw.next(borrow));
+                    let _ = raw.next(borrow);
                 }
 
                 //consume_count = consume_count.map(|count| count.sub(1));

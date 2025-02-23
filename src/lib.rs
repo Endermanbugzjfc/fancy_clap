@@ -1,4 +1,7 @@
 mod parse;
+mod range;
+mod alias;
+mod location;
 
 pub use parse::ArgLocator;
 
