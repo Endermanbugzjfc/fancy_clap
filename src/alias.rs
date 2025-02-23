@@ -26,7 +26,7 @@ pub enum ArgAlias {
 /// lead to the same argument. For implementation examples, see
 /// [`ClapAliasesMapper::get_arg()`].
 /// [`std::cell::LazyCell`].
-pub trait AliasToArgMapper<T: Borrow<clap::Arg>, S: PartialEq> {
+pub trait AliasToArgMapper<T: Borrow<clap::Arg>, S> {
     type SkipReason;
 
     /// Returning [`Err`] implies this argument should be skipped.
@@ -34,18 +34,18 @@ pub trait AliasToArgMapper<T: Borrow<clap::Arg>, S: PartialEq> {
     /// data types to modify any values. For example, to achieve lazy
     /// initilisation, use [`OnceCell`] or [`std::cell::LazyCell`].
     fn get_arg(&self, alias: &ArgAlias) -> Result<T, Self::SkipReason>;
-    fn get_derived_mapper(&self, alias: &S) -> Result<Self, Self::SkipReason>
-        where Self: Sized;
+    fn get_derived_mapper<M>(&self, alias: &S) -> Result<M, Self::SkipReason>
+        where M: AliasToArgMapper<T, S>;
 }
 
 #[derive(Debug)]
 /// Lazily collect aliases from [`Command`] and pair them with reference
 /// counted [`clap::Arg`] or subcommands.
 /// Please see [`Self::new()`] and [`Self::from_command_factory()`].
-pub struct ClapAliasesMapper<C: Borrow<Command>, S> {
+pub struct ClapAliasesMapper<C: Borrow<Command>> {
     pub command: C,
     arg_aliases: OnceCell<Vec<(ArgAlias, Rc<clap::Arg>)>>,
-    command_aliases: OnceCell<Vec<(String, C)>>,
+    command_aliases: OnceCell<Vec<(String, usize)>>,
 }
 
 impl ClapAliasesMapper<Command> {
@@ -76,10 +76,9 @@ impl ClapAliasesMapper<Command> {
 }
 
 impl<C: Borrow<Command>> ClapAliasesMapper<C> {
-    /// For Clap Builder users: [`clap::command!`] will
-    /// create a [`Command`]. You may want to use
-    /// [`Self::from_command_factory()`] if you use
-    /// Clap Derive instead.
+    /// For Clap Builder users: a [`Command`] instance may be obtained
+    /// by calling [`clap::command!`]. However, you may want to use
+    /// [`Self::from_command_factory()`] if you use Clap Derive instead.
     ///
     /// # Example
     /// ```
@@ -101,30 +100,32 @@ impl<C: Borrow<Command>> ClapAliasesMapper<C> {
             command_aliases: OnceCell::new(),
         }
     }
+
+    fn borrow_command(&self) -> &Command {
+        // For some reason rust-analyzer could not infer the type:
+        self.command.borrow()
+    }
 }
 
 impl<C, S> AliasToArgMapper<Rc<clap::Arg>, S> for ClapAliasesMapper<C>
 where
     C: Borrow<Command>,
-    S: PartialEq,
+    S: PartialOrd<String>,
 {
     /// Not meant to be displayed to the end user.
     type SkipReason = &'static str;
 
-    /// Binary searches all registered argument aliases and return
-    /// a reference counted [`clap::Arg`]. Calling this will populate
-    /// the aliases list if it have not been done yet.
-    /// Returns [`Err`] if the alias is still unidentified.
+    /// Binary searches all registered argument aliases and return a
+    /// reference counted [`clap::Arg`]. Calling this will populate the
+    /// aliases list if it have not been done yet. Returns [`Err`] if
+    /// the alias is still unidentified.
     ///
     /// Please note that subcommands require a separate mapper,
     /// see [`Self::get_derived_mapper()`].
     fn get_arg(&self, alias: &ArgAlias) -> Result<Rc<clap::Arg>, Self::SkipReason> {
         let inner = self.arg_aliases .get_or_init(|| {
             let mut aliases = vec![];
-            // For some reason rust-analyzer could not infer the type:
-            let command: &Command = self.command.borrow();
-
-            for arg in command.get_arguments() {
+            for arg in self.borrow_command().get_arguments() {
                 let rc = Rc::new(arg.to_owned());
                 for long in arg
                     .get_long()
@@ -160,16 +161,15 @@ where
     /// a reference counted [`AliasToArgMapper`]. Calling this will
     /// populate the aliases list if it have not been done yet.
     /// Returns [`Err`] if the alias is still unidentified.
-    fn get_derived_mapper(&self, alias: &S) -> Result<Self, Self::SkipReason> {
+    fn get_derived_mapper<M=ClapAliasesMapper<T, S>>(&self, alias: &S) -> Result<M, Self::SkipReason> {
         let inner = self.command_aliases.get_or_init(|| {
             let mut aliases = vec![];
-            // For some reason rust-analyzer could not infer the type:
             let command: &Command = self.command.borrow();
 
-            for subcommand in command.get_subcommands() {
+            for (index, subcommand) in command.get_subcommands().enumerate() {
                 let rc = Rc::new(subcommand);
                 for alias in subcommand.get_all_aliases() {
-                    aliases.push((alias.to_owned(), rc));
+                    aliases.push((alias.to_owned(), index));
                 }
             }
             // Sorting is required by binary search:
@@ -178,9 +178,24 @@ where
             aliases
         });
         let index = inner
-            .binary_search_by(|(k, _)| k.cmp(alias))
+            .binary_search_by(|(k, _)| {
+                alias
+                    .partial_cmp(k)
+                    .expect("PartialOrd<String> implemented for alias")
+                    .reverse()
+            })
             .map_err(|_| "Unknown alias")?;
 
-        Ok(Self::new(inner[index]))
+        let command = self
+            .borrow_command()
+            .get_subcommands()
+            .take(inner[index].1)
+            .next()
+            .unwrap();
+        Ok(ClapAliasesMapper {
+            command,
+            arg_aliases: OnceCell::new(),
+            command_aliases: OnceCell::new(),
+        })
     }
 }
